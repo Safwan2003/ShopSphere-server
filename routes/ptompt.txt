@@ -1,0 +1,923 @@
+// routes/orderRoutes.js
+const express = require('express');
+const Order = require('../models/Order'); // Ensure the path is correct
+const auth = require('../middleware/auth'); // Ensure the path is correct
+const router = express.Router();
+const Reward = require('../models/Reward');
+const RewardPolicy = require('../models/RewardPolicy');
+
+// Get orders for a specific user or all orders for admin
+router.get('/history', auth, async (req, res) => {
+  try {
+    const userId = req.user.id; // Get user ID from the request
+    console.log(userId);
+    const orders = await Order.find({ user: userId }).sort({ createdAt: -1 }); // Sort orders by creation date
+    console.log(orders);
+    res.json(orders);
+  } catch (error) {
+    console.error('Error fetching orders:', error.message);
+    res.status(500).json({ message: 'Server Error' });
+  }
+});
+
+// Create an order
+router.post('/', auth, async (req, res) => {
+  const {
+    orderItems,
+    shippingAddress,
+    paymentMethod,
+    itemsPrice,
+    taxPrice,
+    shippingPrice,
+    totalPrice,
+    phoneNumber,
+  } = req.body;
+
+  // Collect missing fields
+  const missingFields = [];
+  if (!orderItems) missingFields.push('orderItems');
+  if (!shippingAddress) missingFields.push('shippingAddress');
+  if (!paymentMethod) missingFields.push('paymentMethod');
+  if (!itemsPrice) missingFields.push('itemsPrice');
+  if (!taxPrice) missingFields.push('taxPrice');
+  if (!shippingPrice) missingFields.push('shippingPrice');
+  if (!totalPrice) missingFields.push('totalPrice');
+  if (!phoneNumber) missingFields.push('phoneNumber');
+  if (!req.user || !req.user.id) missingFields.push('user');
+
+  if (missingFields.length > 0) {
+    return res.status(400).json({ message: `Missing fields: ${missingFields.join(', ')}` });
+  }
+
+  try {
+    console.log('User in request:', req.user.id);
+
+    const newOrder = new Order({
+      user: req.user.id,
+      orderItems,
+      shippingAddress,
+      paymentMethod,
+      itemsPrice,
+      taxPrice,
+      shippingPrice,
+      totalPrice,
+      phoneNumber,
+    });
+
+    const savedOrder = await newOrder.save();
+    console.log(savedOrder);
+
+
+
+
+
+    const productIds = orderItems.map(item => item.product);
+
+    await User.findByIdAndUpdate(userId, { $addToSet: { purchasedProducts: { $each: productIds } } });
+
+
+
+
+    // Integrate reward system
+    const activePolicy = await RewardPolicy.findOne({ isActive: true });
+    if (activePolicy) {
+      const rewardPoints = Math.floor(totalPrice * activePolicy.pointsPerCurrencyUnit);
+
+      let reward = await Reward.findOne({ user: req.user.id });
+      if (!reward) {
+        reward = new Reward({ user: req.user.id, points: rewardPoints });
+      } else {
+        reward.points += rewardPoints;
+      }
+      await reward.save();
+    }
+
+    res.status(201).json(savedOrder);
+  } catch (error) {
+    console.error('Order creation error:', error.message);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Get all orders (admin only)
+router.get('/', auth, async (req, res) => {
+  try {
+    const orders = await Order.find().populate('user', 'name email');
+    res.json(orders);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get a single order by ID
+router.get('/:id', auth, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id).populate('user', 'name email');
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+    res.json(order);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update an order (admin only)
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const updatedOrder = await Order.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!updatedOrder) return res.status(404).json({ message: 'Order not found' });
+    res.json(updatedOrder);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete an order (admin only)
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const deletedOrder = await Order.findByIdAndDelete(req.params.id);
+    if (!deletedOrder) return res.status(404).json({ message: 'Order not found' });
+    res.json({ message: 'Order deleted' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+module.exports = router;
+
+
+
+
+
+
+
+const express = require('express');
+const multer = require('multer');
+const cloudinary = require('../config/cloudinary');
+const Product = require('../models/Product');
+const Category = require('../models/Category');
+const auth = require('../middleware/auth');
+const admin = require('../middleware/admin');
+const User = require('../models/User');
+const router = express.Router();
+
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// Create a product with image upload
+router.post('/', auth, upload.single('image'), async (req, res) => {
+    const { name, price, description, category } = req.body;
+
+    if (!name || !price || !description || !category) {
+        return res.status(400).json({ message: 'All fields except image are required' });
+    }
+
+    if (isNaN(price) || price <= 0) {
+        return res.status(400).json({ message: 'Invalid price. Price must be a positive number.' });
+    }
+
+    try {
+        const validCategory = await Category.findById(category);
+        if (!validCategory) return res.status(400).json({ message: 'Invalid category' });
+
+        let imageUrl = '';
+
+        if (req.file) {
+            const result = await new Promise((resolve, reject) => {
+                const stream = cloudinary.uploader.upload_stream(
+                    { resource_type: 'image' },
+                    (error, result) => {
+                        if (error) return reject(error);
+                        resolve(result);
+                    }
+                );
+                stream.end(req.file.buffer);
+            });
+            imageUrl = result.secure_url;
+        }
+
+        const product = new Product({
+            name,
+            price,
+            description,
+            category,
+            image: imageUrl
+        });
+
+        await product.save();
+
+        res.status(201).json(product);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+// Read all products
+router.get('/', async (req, res) => {
+    try {
+        const products = await Product.find().populate('category', 'name');
+        res.json(products);
+    } catch (error) {
+        res.status(500).json({ message: 'Error retrieving products', error: error.message });
+    }
+});
+
+// Get a single product by ID
+router.get('/:id', async (req, res) => {
+    try {
+        const product = await Product.findById(req.params.id).populate('category', 'name');
+        if (!product) {
+            return res.status(404).json({ message: 'Product not found' });
+        }
+        res.json(product);
+    } catch (error) {
+        res.status(500).json({ message: 'Error retrieving product', error: error.message });
+    }
+});
+
+// Update a product with optional image upload
+router.put('/:id', [auth, upload.single('image')], async (req, res) => {
+    const { name, price, description, category } = req.body;
+    const productId = req.params.id;
+
+    if (!name || !price || !description || !category) {
+        return res.status(400).json({ message: 'All fields except image are required' });
+    }
+
+    if (isNaN(price) || price <= 0) {
+        return res.status(400).json({ message: 'Invalid price. Price must be a positive number.' });
+    }
+
+    try {
+        const validCategory = await Category.findById(category);
+        if (!validCategory) return res.status(400).json({ message: 'Invalid category' });
+
+        let imageUrl = '';
+
+        if (req.file) {
+            const result = await new Promise((resolve, reject) => {
+                const stream = cloudinary.uploader.upload_stream(
+                    { resource_type: 'image' },
+                    (error, result) => {
+                        if (error) return reject(error);
+                        resolve(result);
+                    }
+                );
+                stream.end(req.file.buffer);
+            });
+            imageUrl = result.secure_url;
+        }
+
+        const product = await Product.findById(productId);
+        if (!product) return res.status(404).json({ message: 'Product not found' });
+
+        product.name = name;
+        product.price = price;
+        product.description = description;
+        product.category = category;
+        if (imageUrl) product.image = imageUrl;
+
+        await product.save();
+
+        res.json(product);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+// Delete a product
+router.delete('/:id', auth, async (req, res) => {
+    try {
+        const product = await Product.findByIdAndDelete(req.params.id);
+        if (!product) return res.status(404).json({ message: 'Product not found' });
+        res.json({ message: 'Product deleted' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+//tract product views
+router.post('/view-product/:productId', async (req, res) => {
+    try {
+      const userId = req.user._id; // or retrieve user ID from token/session
+      const productId = req.params.productId;
+  
+      await User.findByIdAndUpdate(userId, { $addToSet: { viewedProducts: productId } });
+      
+      res.status(200).json({ message: 'Product view tracked' });
+    } catch (error) {
+      res.status(500).json({ message: 'Error tracking product view' });
+    }
+  });
+  
+
+
+
+module.exports = router;
+
+
+
+
+
+
+
+
+const express = require('express');
+const Category = require('../models/Category');
+const auth = require('../middleware/auth');
+const admin = require('../middleware/admin');
+const router = express.Router();
+
+// Create a category
+router.post('/', [auth, admin], async (req, res) => {
+    try {
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ message: 'Category name is required' });
+
+        const category = new Category({ name });
+        await category.save();
+        res.status(201).json(category);
+    } catch (error) {
+        res.status(400).json({ message: 'Error creating category', error: error.message });
+    }
+});
+
+// Get all categories
+router.get('/', async (req, res) => {
+    try {
+        const categories = await Category.find();
+        res.status(200).json(categories);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching categories', error: error.message });
+    }
+});
+
+// Get a single category by ID
+router.get('/:id', async (req, res) => {
+    try {
+        const category = await Category.findById(req.params.id);
+        if (!category) return res.status(404).json({ message: 'Category not found' });
+        res.status(200).json(category);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching category', error: error.message });
+    }
+});
+
+// Update a category
+router.put('/:id', [auth, admin], async (req, res) => {
+    try {
+        const category = await Category.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        if (!category) return res.status(404).json({ message: 'Category not found' });
+        res.status(200).json(category);
+    } catch (error) {
+        res.status(400).json({ message: 'Error updating category', error: error.message });
+    }
+});
+
+// Delete a category
+router.delete('/:id', [auth, admin], async (req, res) => {
+    try {
+        const category = await Category.findById(req.params.id);
+        if (!category) return res.status(404).json({ message: 'Category not found' });
+
+        await category.remove(); // This triggers the pre-remove middleware
+
+        res.status(200).json({ message: 'Category deleted' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error deleting category', error: error.message });
+    }
+});
+
+module.exports = router;
+
+
+
+
+
+const express = require('express');
+const router = express.Router();
+const Order = require('../models/Order');
+const Product = require('../models/Product');
+const User = require('../models/User');
+const Category = require('../models/Category');
+
+// Route to get total sales amount
+router.get('/total-sales', async (req, res) => {
+  try {
+    const totalSales = await Order.aggregate([
+      { $match: { isPaid: true } },
+      { $group: { _id: null, total: { $sum: "$totalPrice" } } },
+    ]);
+    res.json({ totalSales: totalSales[0]?.total || 0 });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get number of orders
+router.get('/order-count', async (req, res) => {
+  try {
+    const orderCount = await Order.countDocuments();
+    res.json({ orderCount });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get average order value
+router.get('/average-order-value', async (req, res) => {
+  try {
+    const averageOrderValue = await Order.aggregate([
+      { $match: { isPaid: true } },
+      { $group: { _id: null, avgValue: { $avg: "$totalPrice" } } },
+    ]);
+    res.json({ averageOrderValue: averageOrderValue[0]?.avgValue || 0 });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get sales by category
+router.get('/sales-by-category', async (req, res) => {
+  try {
+    const salesByCategory = await Order.aggregate([
+      { $match: { isPaid: true } },
+      { $unwind: "$orderItems" },
+      {
+        $group: {
+          _id: "$orderItems.category",
+          totalSales: { $sum: "$orderItems.price" },
+        },
+      },
+    ]);
+    res.json(salesByCategory);
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get total number of customers
+router.get('/customer-count', async (req, res) => {
+  try {
+    const customerCount = await User.countDocuments({ isAdmin: false });
+    res.json({ customerCount });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get new customers over a period (e.g., last 30 days)
+router.get('/new-customers', async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const newCustomers = await User.find({
+      isAdmin: false,
+      createdAt: { $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) },
+    }).countDocuments();
+    res.json({ newCustomers });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get top customers by purchase amount
+router.get('/top-customers', async (req, res) => {
+  try {
+    const topCustomers = await Order.aggregate([
+      { $match: { isPaid: true } },
+      { $group: { _id: "$user", totalSpent: { $sum: "$totalPrice" } } },
+      { $sort: { totalSpent: -1 } },
+      { $limit: 5 },
+      { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'userDetails' } },
+      { $unwind: "$userDetails" },
+      { $project: { _id: 0, name: "$userDetails.name", email: "$userDetails.email", totalSpent: 1 } },
+    ]);
+    res.json(topCustomers);
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get top-selling products
+router.get('/top-selling-products', async (req, res) => {
+  try {
+    const topSellingProducts = await Order.aggregate([
+      { $match: { isPaid: true } },
+      { $unwind: "$orderItems" },
+      { $group: { _id: "$orderItems.product", totalQty: { $sum: "$orderItems.qty" } } },
+      { $sort: { totalQty: -1 } },
+      { $limit: 5 },
+      { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productDetails' } },
+      { $unwind: "$productDetails" },
+      { $project: { _id: 0, name: "$productDetails.name", totalQty: 1 } },
+    ]);
+    res.json(topSellingProducts);
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get number of orders by status
+router.get('/orders-by-status', async (req, res) => {
+  try {
+    const ordersByStatus = await Order.aggregate([
+      { $group: { _id: { isPaid: "$isPaid", isDelivered: "$isDelivered" }, count: { $sum: 1 } } },
+      { $project: { _id: 0, isPaid: "$_id.isPaid", isDelivered: "$_id.isDelivered", count: 1 } },
+    ]);
+    res.json(ordersByStatus);
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get order volume over time (daily)
+router.get('/order-volume-daily', async (req, res) => {
+  try {
+    const orderVolumeDaily = await Order.aggregate([
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          totalOrders: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+    res.json(orderVolumeDaily);
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+// Route to get average time from order to delivery
+router.get('/average-delivery-time', async (req, res) => {
+  try {
+    const averageDeliveryTime = await Order.aggregate([
+      { $match: { isDelivered: true } },
+      {
+        $project: {
+          diff: { $subtract: ["$deliveredAt", "$createdAt"] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          avgTime: { $avg: "$diff" },
+        },
+      },
+    ]);
+    res.json({ averageDeliveryTime: averageDeliveryTime[0]?.avgTime || 0 });
+  } catch (error) {
+    res.status(500).json({ message: 'Server Error', error });
+  }
+});
+
+module.exports = router;
+
+
+
+
+
+
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const passport = require('passport');
+const router = express.Router();
+const auth = require('../middleware/auth'); // Import auth middleware
+
+// User registration
+router.post('/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  try {
+    let user = await User.findOne({ email });
+    if (user) return res.status(400).json({ message: 'User already exists' });
+
+    // Hash password before saving
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    user = new User({ name, email, password: hashedPassword, isAdmin: true });
+    await user.save();
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// User login
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Google OAuth
+router.get('/google', passport.authenticate('google', {
+  scope: ['profile', 'email']
+}));
+
+router.get('/google/callback', passport.authenticate('google', { session: false }), (req, res) => {
+  // Redirect to frontend with token and user data
+  const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  const user = {
+    id: req.user._id,
+    name: req.user.name,
+    email: req.user.email,
+    image: req.user.image // Add this field if it's available
+  };
+  res.redirect(`${process.env.CLIENT_URL}/?token=${token}&user=${encodeURIComponent(JSON.stringify(user))}`);
+});
+
+// Get user details
+router.get('/getuser', auth, async (req, res) => {
+  try {
+    console.log(req.user.id)
+    const user = await User.findById(req.user.id).select('-password'); // Exclude password field
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json(user);
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+module.exports = router;
+
+
+
+
+
+
+// routes/reviews.js
+const express = require('express');
+const Review = require('../models/Review');
+const Product = require('../models/Product');
+const auth = require('../middleware/auth');
+const router = express.Router();
+
+// Create a new review
+router.post('/:productId', auth, async (req, res) => {
+  const { rating, comment } = req.body;
+  const { productId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+
+    const review = new Review({
+      product: productId,
+      user: userId,
+      rating,
+      comment
+    });
+
+    await review.save();
+
+    const reviews = await Review.find({ product: productId });
+    product.numReviews = reviews.length;
+    product.averageRating = reviews.reduce((acc, review) => acc + review.rating, 0) / reviews.length;
+
+    await product.save();
+
+    res.status(201).json({ message: 'Review added successfully', review });
+  } catch (error) {
+    console.error('Server error:', error.message);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Fetch reviews for a product
+router.get('/:productId', async (req, res) => {
+  const { productId } = req.params;
+
+  try {
+    const reviews = await Review.find({ product: productId }).populate('user', 'name');
+    res.json(reviews);
+  } catch (error) {
+    console.error('Server error:', error.message);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+module.exports = router;
+
+
+
+
+
+const express = require('express');
+const User = require('../models/User');
+const auth = require('../middleware/auth');
+const admin = require('../middleware/admin');
+const router = express.Router();
+
+// Get all users
+router.get('/', [auth, admin], async (req, res) => {
+    try {
+        const users = await User.find();
+        res.json(users);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Get a single user by ID
+router.get('/:id', [auth, admin], async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        res.json(user);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Update a user
+router.put('/:id', [auth, admin], async (req, res) => {
+    try {
+        const user = await User.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        res.json(user);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Delete a user
+router.delete('/:id', [auth, admin], async (req, res) => {
+    try {
+        const user = await User.findByIdAndDelete(req.params.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        res.json({ message: 'User deleted' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+module.exports = router;
+
+
+
+// routes/rewardRoutes.js
+const express = require('express');
+const Reward = require('../models/Reward');
+const auth = require('../middleware/auth');
+const router = express.Router();
+
+
+router.get('/', auth, async (req, res) => {
+    const  userId = req.user.id;
+  console.log(req.user.id)
+    try {
+      const reward = await Reward.findOne({ user: userId });
+      if (!reward) {
+        return res.status(404).json({ message: 'Reward record not found' });
+      }
+  
+      res.json(reward);
+    } catch (error) {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+);
+
+
+
+
+
+
+
+router.post('/redeem', auth, async (req, res) => {
+    const {  pointsToRedeem } = req.body;
+  const userId=req.user.id
+    try {
+      const reward = await Reward.findOne({ user: userId });
+      if (!reward) {
+        return res.status(404).json({ message: 'Reward record not found' });
+      }
+  
+      if (reward.points < pointsToRedeem) {
+        return res.status(400).json({ message: 'Insufficient reward points' });
+      }
+  
+      reward.points -= pointsToRedeem;
+      await reward.save();
+  
+      const discount = pointsToRedeem * 0.1;
+  
+      res.json({ message: 'Rewards redeemed successfully', discount });
+    } catch (error) {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+  );
+
+module.exports = router;
+
+
+
+// routes/rewardPolicyRoutes.js
+const express = require('express');
+const RewardPolicy = require('../models/RewardPolicy'); // Ensure this import is correct
+const auth = require('../middleware/auth');
+const router = express.Router();
+
+router.post('/', auth, async (req, res) => {
+  const { name, description, pointsPerCurrencyUnit } = req.body;
+
+  try {
+    const policy = new RewardPolicy({ name, description, pointsPerCurrencyUnit });
+    await policy.save();
+    res.json({ message: 'Reward policy created successfully', policy });
+  } catch (error) {
+    console.error(error.message)
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+router.put('/', auth, async (req, res) => {
+  const { policyId, name, description, pointsPerCurrencyUnit, isActive } = req.body;
+
+  try {
+    const policy = await RewardPolicy.findById(policyId);
+    if (!policy) {
+      return res.status(404).json({ message: 'Reward policy not found' });
+    }
+
+    policy.name = name || policy.name;
+    policy.description = description || policy.description;
+    policy.pointsPerCurrencyUnit = pointsPerCurrencyUnit || policy.pointsPerCurrencyUnit;
+    policy.isActive = isActive !== undefined ? isActive : policy.isActive;
+
+    await policy.save();
+    res.json({ message: 'Reward policy updated successfully', policy });
+  } catch (error) {
+    console.error(error.message)
+
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+router.get('/', auth, async (req, res) => {
+  try {
+    const policies = await RewardPolicy.find();
+    res.json(policies);
+  } catch (error) {
+    console.error(error.message)
+
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+module.exports = router;
+
+
+
+
+
+check is my system is ok or it need more data collection and my system is ok for getting rhe data for data collection for ml model recommendation system
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
